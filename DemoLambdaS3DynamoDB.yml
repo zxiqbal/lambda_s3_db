@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion : 2010-09-09
+Description: Create S3 bucket as an event source for a Lambda function, uplad csv file and load in DynamoDB table
+Parameters:
+  BucketName:
+    Type: String
+Resources:
+  Bucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - ProcessingLambdaPermission
+    Properties:
+      BucketName: !Ref BucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ProcessingLambdaFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                - Name: suffix
+                  Value: .csv
+
+  ProcessingLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref ProcessingLambdaFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub 'arn:aws:s3:::${BucketName}'
+      SourceAccount: !Ref AWS::AccountId
+
+  ProcessingLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+        - PolicyName: allowLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:*
+              Resource: arn:aws:logs:*:*:*
+        - PolicyName: getAndDeleteObjects
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - s3:GetObject
+              - s3:DeleteObject
+              - dynamodb:PutItem
+              Resource:  !Sub 'arn:aws:s3:::${BucketName}/*'
+
+  ProcessingLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          s3_client = boto3.client("s3")
+          dynamodb = boto3.resource('dynamodb')
+          # Create the DynamoDB tableghgg.
+          table = dynamodb.Table('PhoneTable_prod')
+          def lambda_handler(event, context):
+            bucket1 = event['Records'][0]['s3']['bucket']['name']
+            fileName1 = event['Records'][0]['s3']['object']['key']
+            resp = s3_client.get_object(Bucket = bucket1, Key =fileName1)
+            data = resp['Body'].read().decode("utf-8")
+            phones = data.split("\n")
+            for ph in phones:
+              ph_data = ph.split(",");
+              #print(ph)
+              table.put_item(
+                Item = {
+                         "id":ph_data[0],
+                         "name": ph_data[1],
+                         "phone": ph_data[2]
+                       }
+                       )
+      Handler: index.lambda_handler
+      Role: !GetAtt ProcessingLambdaExecutionRole.Arn
+      Runtime: python3.6
+      MemorySize: 512
+      Timeout: 120
+  PhoneTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: PhoneTable_prod
+      AttributeDefinitions:
+        - AttributeName: "id"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "id"
+          KeyType: "HASH"
+      TimeToLiveSpecification:
+        AttributeName: "ExpirationTime"
+        Enabled: true
+      ProvisionedThroughput:
+        ReadCapacityUnits: "100"
+        WriteCapacityUnits: "100"
+    DependsOn:
+      - DynamoDBQueryPolicy
+
+  DynamoDBQueryPolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: DynamoDBQueryPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "dynamodb:Query"
+            Resource: "*"
+      Roles:
+        - Ref: "PhoneTableQueryRole"
+
+  PhoneTableQueryRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "dynamodb.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
